@@ -79,6 +79,20 @@ If you would rather supply your own config, mount it over
 | `CRM_PORT` | Host port, defaults to `80`. |
 | `CRM_TRUSTED_PROXY` | CIDR allowed to set `X-Forwarded-For`. Narrow it to your proxy's address. |
 
+### A `.env` gotcha worth knowing
+
+Docker Compose interpolates `$VAR` inside `.env` values. An **unquoted** `$`
+is read as a variable reference and the remainder of the value is silently
+discarded — only a warning appears on stderr:
+
+```ini
+MYSQL_PASSWORD=pa$word     # container receives "pa"
+MYSQL_PASSWORD='pa$word'   # container receives "pa$word"   <-- correct
+```
+
+Single-quote any value containing `$`. Quotes, backslashes and semicolons are
+safe unquoted. `test/smoke.sh` asserts this behaviour so it cannot regress.
+
 ## Behind a reverse proxy
 
 The stack is built for TLS termination in front of it.
@@ -117,16 +131,21 @@ the application runs its own schema migrations. **Back up the database first.**
 
 ## Backups
 
+Read the credentials from the database container's own environment rather than
+sourcing `.env`. Compose may have resolved a quoted value differently than your
+shell would, and this stays correct either way:
+
 ```bash
-docker compose exec -T db mariadb-dump -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" \
-  "$MYSQL_DATABASE" | gzip > backup-$(date +%F).sql.gz
+docker compose exec -T db sh -c \
+  'mariadb-dump -u"$MARIADB_USER" -p"$MARIADB_PASSWORD" "$MARIADB_DATABASE"' \
+  | gzip > "backup-$(date +%F).sql.gz"
 ```
 
 Restore:
 
 ```bash
-gunzip -c backup-2026-01-01.sql.gz | docker compose exec -T db \
-  mariadb -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE"
+gunzip -c backup-2026-01-01.sql.gz | docker compose exec -T db sh -c \
+  'mariadb -u"$MARIADB_USER" -p"$MARIADB_PASSWORD" "$MARIADB_DATABASE"'
 ```
 
 Also back up the `.env`. It holds your database credentials, and without it a

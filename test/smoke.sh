@@ -12,9 +12,16 @@ HERE="$(cd "$(dirname "$0")/.." && pwd)"
 PROJECT="${PROJECT:-crmtest}"
 PORT="${PORT:-18999}"
 IMAGE="${IMAGE:-dvalin21/churchcrm:7.7.1-apache}"
-# Deliberately awkward: quote, backslash, semicolon and dollar all have to
-# survive .env -> container env -> Config.php -> mariadb client.
-DB_PASS="TestPw0'quote\\and;dollar\$"
+# Random per run, carrying a single quote, a backslash and a semicolon: all of
+# these must survive .env -> container environment -> Config.php -> mariadb client
+# unmangled. Generated rather than hardcoded so this repository trips no credential
+# scanners; it only ever guards a throwaway container on a throwaway port.
+#
+# Deliberately no '$': Docker Compose interpolates $VAR inside .env values, so an
+# unquoted '$' silently truncates the value. That is Compose behaviour, not a bug
+# here, and it is covered by its own check below and documented in .env.example.
+SUFFIX="$(head -c 32 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 16)"
+DB_PASS="Test'\\;Pw${SUFFIX}"
 
 PASS=0; FAIL=0; FAILED_NAMES=()
 c_g=$'\033[32m'; c_r=$'\033[31m'; c_y=$'\033[33m'; c_0=$'\033[0m'
@@ -34,8 +41,8 @@ dbq() { compose exec -T -e MYSQL_PWD="$DB_PASS" db mariadb -N -B -u churchcrm ch
 # Wait for a service to report healthy. Compose omits non-running containers from
 # `ps`, so ask for the service by name and treat "no such container" as not-yet.
 wait_healthy() {
-  local svc="$1" s i
-  for i in $(seq 1 60); do
+  local svc="$1" s
+  for _ in $(seq 1 60); do
     s="$(compose ps -a --format '{{.Health}}' "$svc" 2>/dev/null | tr -d '\r\n ')"
     [ "$s" = "healthy" ] && return 0
     sleep 3
@@ -118,6 +125,53 @@ GUARD_OUT="$(docker run --rm --entrypoint /bin/sh \
 case "$GUARD_OUT" in
   *"DB_PASSWORD is required but empty"*) ok "empty DB_PASSWORD rejected with a clear error" ;;
   *) bad "empty DB_PASSWORD rejected with a clear error" "got: $GUARD_OUT" ;;
+esac
+
+# A '$' in the password must survive into Config.php. Set through `docker run -e`
+# rather than a .env file, because Compose truncates unquoted '$' in .env (checked
+# separately below) and would mask a real escaping bug here.
+head_ "Password escaping in Config.php"
+ESCAPE_PW='a$Pw"q\r;s\'   # dollar, double quote, backslash, semicolon, trailing backslash
+ESCAPE_OUT="$(docker run --rm --entrypoint /bin/sh \
+  -v "$HERE/render-config.sh:/opt/churchcrm/render-config.sh:ro" \
+  -v "$HERE/test/inspect-config.sh:/inspect.sh:ro" \
+  -e DB_SERVER_NAME=db -e DB_NAME=crm -e DB_USER=crm \
+  -e "DB_PASSWORD=$ESCAPE_PW" -e URL=https://crm.example.org/ \
+  "$IMAGE" /inspect.sh 2>&1 || true)"
+case "$ESCAPE_OUT" in
+  *"LINT_OK"*) ok "Config.php with '\$, quote, backslash and semicolon is valid PHP" ;;
+  *) bad "Config.php escaping" "$(printf '%s' "$ESCAPE_OUT" | head -3)" ;;
+esac
+case "$ESCAPE_OUT" in
+  *"VALUE=$ESCAPE_PW"*) ok "password round-trips through Config.php unaltered" ;;
+  *) bad "password round-trips through Config.php unaltered" "$(printf '%s' "$ESCAPE_OUT" | grep VALUE)" ;;
+esac
+
+# Document Compose's .env '$' behaviour so it cannot regress unnoticed.
+head_ "Compose .env interpolation"
+ENVTEST="$(mktemp -d)"
+printf 'V=a$Pw\nV2=%s\n' "'a\$Pw'" > "$ENVTEST/.env"
+cat > "$ENVTEST/compose.yaml" <<'YAML'
+services:
+  t:
+    image: busybox
+    # printenv emits bare values, one per line: first line is V, second is V2.
+    command: ['printenv', 'V', 'V2']
+    environment:
+      V: ${V}
+      V2: ${V2}
+YAML
+ENVOUT="$(docker compose -p envprobe --env-file "$ENVTEST/.env" -f "$ENVTEST/compose.yaml" \
+  up --no-log-prefix 2>/dev/null | tr -d '\r' | grep -xE 'a(\$Pw)?' | tr '\n' '|')"
+docker compose -p envprobe -f "$ENVTEST/compose.yaml" down -v >/dev/null 2>&1
+rm -rf "$ENVTEST"
+case "$ENVOUT" in
+  "a|"*) ok "unquoted \$ in .env truncates the value (documented footgun)" ;;
+  *) bad "unquoted \$ in .env truncates the value" "got: $ENVOUT" ;;
+esac
+case "$ENVOUT" in
+  *'a$Pw|'*) ok "single-quoted \$ in .env is preserved verbatim" ;;
+  *) bad "single-quoted \$ in .env is preserved verbatim" "got: $ENVOUT" ;;
 esac
 
 # -------------------------------------------------------- lifecycle: clean ----
