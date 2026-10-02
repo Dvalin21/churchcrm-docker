@@ -1,0 +1,86 @@
+# NOTICE
+
+This repository is **unaffiliated third-party packaging** for
+[ChurchCRM](https://github.com/churchcrm/crm). It is not endorsed by or
+maintained by the ChurchCRM project.
+
+## The software being packaged
+
+**ChurchCRM** is the work of the ChurchCRM contributors.
+
+- Project: <https://github.com/churchcrm/crm>
+- Website: <https://churchcrm.io>
+- License: MIT — `Copyright (c) 2023 ChurchCRM`, reproduced verbatim in
+  [`LICENSE`](LICENSE) as the MIT license requires.
+
+ChurchCRM itself is not vendored into this repository. This repo contains only
+deployment configuration, and builds the application from the **official
+release artifact** published by the ChurchCRM project
+(`ChurchCRM-<version>.zip`, GitHub Releases). `build.sh` verifies that artifact
+against the SHA-256 digest recorded in the GitHub Releases API before building,
+so no application source is forked or re-hosted here.
+
+## What was reused from upstream, verbatim
+
+These files are taken from the ChurchCRM repository (MIT, same terms) and are
+used unmodified:
+
+| File | Upstream path |
+|---|---|
+| Apache + PHP 8.4 image, all stages | `docker/Dockerfile.churchcrm-apache-php8` |
+| Release-archive extractor | `docker/prepare-release-context.py` |
+| Apache server config | `docker/apache/default.conf` |
+
+`build.sh` clones upstream and invokes these directly, so credit stays with the
+original authors and upstream fixes are picked up automatically.
+
+## What was written for this repository
+
+| File | Description |
+|---|---|
+| `docker-compose.yaml` | Two-service production stack (app + MariaDB) |
+| `build.sh` | Build driver: fetch, verify, extract, build |
+| `render-config.sh` | Generates `Include/Config.php` from the environment |
+| `remoteip.conf` | `mod_remoteip` config for reverse-proxy deployments |
+| `.github/workflows/docker-publish.yml` | Multi-arch build and publish to Docker Hub |
+| `test/smoke.sh` | Automated verification suite |
+
+These are deployment-layer files only. No ChurchCRM application code was
+modified.
+
+## Upstream authors and contributors
+
+ChurchCRM is built by its contributors. The full list, as recorded by GitHub, is
+at <https://github.com/churchcrm/crm/graphs/contributors>. Rather than copy a
+list that goes stale, this repository links to the canonical page.
+
+The Docker packaging in the upstream repository — including the production
+Dockerfiles, the release-image publish workflow, the checksum verification and
+the security notes in `docker/DOCKER_RELEASE.md` — was written and reviewed by
+the ChurchCRM maintainers. This repository depends on that work and deliberately
+does not duplicate or replace it. In particular, the release-image pipeline that
+upstream designed has never been executed (see below).
+
+## Why this repository exists
+
+The upstream `docker-release.yml` workflow, which would publish versioned images
+to Docker Hub, triggers on `release: published` and has **zero runs**, so the
+tags documented in upstream's `docker/DOCKER_RELEASE.md`
+(`latest-php8-apache`, `<version>-php8-apache`) do not exist on Docker Hub. The
+only images in the `churchcrm/crm` Docker Hub repository are from 2018 and
+predate PHP 8.
+
+Upstream's `docker/examples/` compose files are documented by upstream as *not*
+working recipes ("they are not working release-image recipes"). This repository
+supplies a stack that has been verified end to end.
+
+Fixing the missing upstream publish is the better long-term answer and is the
+ChurchCRM maintainers' to make. Until then, images are built from the official,
+checksum-verified release artifacts.
+
+## Third-party components
+
+The base image is [`php:8.4.25-apache-trixie`](https://hub.docker.com/_/php),
+Copyright The PHP Group, distributed under the PHP License v3.01. The database
+is [`mariadb`](https://hub.docker.com/_/mariadb), Copyright MariaDB Foundation,
+LGPL-2.1. Both are used as unmodified base images.
