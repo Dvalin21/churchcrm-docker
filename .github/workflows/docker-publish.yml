@@ -27,8 +27,13 @@ permissions:
   contents: read
 
 concurrency:
-  group: docker-publish-${{ github.ref }}
-  cancel-in-progress: false
+  # Validation runs and publish runs get separate groups on purpose. GitHub keeps
+  # only one pending run per group, so a shared group meant a routine push to main
+  # silently cancelled an in-flight publish (observed on the first run of this
+  # workflow). Publishing is rare and serialised among itself; validation churns
+  # freely.
+  group: ${{ github.event_name == 'push' && format('validate-{0}', github.ref) || 'publish' }}
+  cancel-in-progress: ${{ github.event_name == 'push' }}
 
 env:
   REGISTRY: docker.io
@@ -119,7 +124,10 @@ jobs:
           context: build-context
           file: upstream/docker/Dockerfile.churchcrm-apache-php8
           target: prod
-          platforms: linux/amd64,linux/arm64
+          # A push to main validates on amd64 only. Compiling the PHP extensions
+          # for both architectures on every commit is slow enough that it also
+          # displaces real publish runs from the concurrency queue.
+          platforms: ${{ (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
           # Push on tag pushes, or on an explicit manual request. Otherwise this is
           # a validation-only build so a push to main cannot clobber a live tag.
           push: ${{ startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.publish) }}
