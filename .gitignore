@@ -1,0 +1,12 @@
+# Local deployment configuration -- contains database credentials. Never commit.
+.env
+.env.test
+
+# Build artifacts produced by build.sh
+upstream/
+build-context/
+ChurchCRM-*.zip
+
+# Test scratch
+.env.test
+test-results/

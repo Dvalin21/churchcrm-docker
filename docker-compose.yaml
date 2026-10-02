@@ -1,0 +1,92 @@
+# ChurchCRM — production stack. Single host, TLS terminated by a reverse proxy
+# in front of it. See .env.example for the values to change.
+#
+#   cp .env.example .env   # then edit it
+#   ./build.sh              # build the app image (no Docker Hub image is published)
+#   docker compose up -d
+#
+# The app image contains no Include/Config.php, so render-config.sh generates it
+# from MYSQL_* and CRM_PUBLIC_URL in .env on every start. That is the whole
+# install: no browser wizard. Bootstrapper creates the schema and the admin
+# account on the first request. Default login is Admin / changeme, and the app
+# forces a password change on first login -- change it immediately.
+
+services:
+  db:
+    image: mariadb:11
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD in .env}
+      MARIADB_DATABASE: ${MYSQL_DATABASE:-churchcrm}
+      MARIADB_USER: ${MYSQL_USER:-churchcrm}
+      MARIADB_PASSWORD: ${MYSQL_PASSWORD:?set MYSQL_PASSWORD in .env}
+    volumes:
+      - db-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 20s
+      retries: 12
+      start_period: 30s
+    # No published port: only the app container needs to reach the database.
+    # Uncomment to attach an IDE from the host, and prefer 127.0.0.1.
+    # ports:
+    #   - "127.0.0.1:3306:3306"
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  crm:
+    image: ${CRM_IMAGE:-dvalin21/churchcrm:7.7.1-apache}
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      # The image serves Apache on 8080 as uid 33 (www-data).
+      # Bound to loopback because the reverse proxy is on this host.
+      # Use "0.0.0.0:80:8080" only if the proxy reaches this over the network.
+      - "${CRM_BIND_ADDR:-127.0.0.1}:${CRM_PORT:-80}:8080"
+    # Generates Include/Config.php from the variables below, then starts Apache.
+    # See render-config.sh for why the app cannot ship this file itself.
+    entrypoint: ["/bin/sh", "/opt/churchcrm/render-config.sh", "apache2-foreground"]
+    environment:
+      # Consumed by render-config.sh -> Include/Config.php.
+      DB_SERVER_NAME: db
+      DB_SERVER_PORT: "3306"
+      DB_NAME: ${MYSQL_DATABASE:-churchcrm}
+      DB_USER: ${MYSQL_USER:-churchcrm}
+      DB_PASSWORD: ${MYSQL_PASSWORD:?set MYSQL_PASSWORD in .env}
+      ROOT_PATH: ${CRM_ROOT_PATH:-}
+      URL: ${CRM_PUBLIC_URL:?set CRM_PUBLIC_URL in .env}
+      # Interpolated by remoteip.conf. Defaults must live here, not in .env, so
+      # these are never empty -- an empty RemoteIPTrustedProxy is a fatal error.
+      CRM_TRUSTED_PROXY: "${CRM_TRUSTED_PROXY:-172.16.0.0/12}"
+      CRM_SERVER_NAME: "${CRM_SERVER_NAME:-crm.local}"
+    volumes:
+      # Member photo/family image uploads. This is real user data, not code, so
+      # it is safe to persist. A fresh named volume is seeded with the image's
+      # own Images/ assets (logos, login-photo.png) on first start.
+      - images-data:/var/www/html/Images
+      - app-logs:/var/www/html/logs
+      - ./remoteip.conf:/etc/apache2/mods-enabled/remoteip.conf:ro
+      - ./render-config.sh:/opt/churchcrm/render-config.sh:ro
+    # The container already runs as non-root (USER www-data, uid 33). This only
+    # blocks privilege escalation via setuid.
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      # /setup is reachable with or without a completed install.
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:8080/setup"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+volumes:
+  db-data:
+  images-data:
+  app-logs:
