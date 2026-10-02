@@ -1,0 +1,132 @@
+name: Build and publish image
+
+# Reproducible equivalent of what upstream's docker-release.yml was meant to do
+# but has never run (zero runs). Builds the ChurchCRM production image from the
+# official, checksum-verified release artifact and pushes it to Docker Hub.
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'ChurchCRM release version, e.g. 7.7.1 (blank = latest release)'
+        required: false
+        type: string
+      sha256:
+        description: 'SHA-256 of ChurchCRM-<version>.zip. Blank = read from the release API.'
+        required: false
+        type: string
+      publish:
+        description: 'Push to Docker Hub'
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: docker.io
+  IMAGE_NAME: dvalin21/churchcrm
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # A tag push pins the exact release. Any other trigger resolves the current
+      # stable release, so a push to main validates a real release rather than
+      # failing to find a release named "main".
+      - name: Resolve release version and checksum
+        id: meta
+        env:
+          IS_TAG: ${{ startsWith(github.ref, 'refs/tags/v') }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_SHA: ${{ inputs.sha256 }}
+        run: |
+          set -euo pipefail
+          if [ "$IS_TAG" = "true" ]; then
+            version="${REF_NAME#v}"
+            source="tag ${REF_NAME}"
+          elif [ -n "${INPUT_VERSION:-}" ]; then
+            version="$INPUT_VERSION"
+            source="workflow input"
+          else
+            version="$(curl -fsSL https://api.github.com/repos/churchcrm/crm/releases/latest \
+              | python3 -c 'import sys,json;print(json.load(sys.stdin)["tag_name"])')"
+            source="latest GitHub release"
+          fi
+
+          # Trust the release API digest over anything passed as input.
+          if [ -z "${INPUT_SHA:-}" ] || [ "$IS_TAG" = "true" ]; then
+            sha="$(curl -fsSL "https://api.github.com/repos/churchcrm/crm/releases/tags/$version" \
+              | python3 -c 'import sys,json;d=json.load(sys.stdin);print(next(a["digest"].split(":",1)[1] for a in d["assets"] if a["name"]=="ChurchCRM-"+d["tag_name"]+".zip"))')"
+          else
+            sha="$INPUT_SHA"
+          fi
+
+          {
+            echo "version=$version"
+            echo "sha256=$sha"
+          } >> "$GITHUB_OUTPUT"
+          echo "version $version (from $source)"
+          echo "sha256  $sha"
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish || startsWith(github.ref, 'refs/tags/v') }}
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Uses ChurchCRM's own Dockerfiles unmodified, so the image stays identical to
+      # what upstream designed and picks up their fixes automatically.
+      - name: Fetch upstream Dockerfiles
+        run: git clone --depth 1 https://github.com/churchcrm/crm.git upstream
+
+      - name: Download and verify release artifact
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          SHA256: ${{ steps.meta.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "ChurchCRM-$VERSION.zip" \
+            "https://github.com/churchcrm/crm/releases/download/$VERSION/ChurchCRM-$VERSION.zip"
+          echo "$SHA256  ChurchCRM-$VERSION.zip" | sha256sum -c -
+
+      - name: Prepare build context
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          python3 upstream/docker/prepare-release-context.py "ChurchCRM-$VERSION.zip" build-context
+          mkdir -p build-context/apache
+          cp upstream/docker/apache/default.conf build-context/apache/default.conf
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: build-context
+          file: upstream/docker/Dockerfile.churchcrm-apache-php8
+          target: prod
+          platforms: linux/amd64,linux/arm64
+          # Push on tag pushes, or on an explicit manual request. Otherwise this is
+          # a validation-only build so a push to main cannot clobber a live tag.
+          push: ${{ startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.publish) }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}-apache
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-apache
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
